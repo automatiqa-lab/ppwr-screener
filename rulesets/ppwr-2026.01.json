@@ -1,0 +1,102 @@
+{
+  "version": "ppwr-2026.01",
+  "jurisdiction": "EU",
+  "description": "Packaging supplier declaration pre-screen. Checks that a supplier submission is complete and internally consistent before it is filed behind a Declaration of Conformity.",
+  "disclaimer": "Completeness and consistency screening only. Not a conformity assessment.",
+
+  "materials": ["paper_board", "plastic", "glass", "metal", "wood", "composite", "other"],
+
+  "field_catalogue": {
+    "supplier_legal_name": { "type": "string", "required": true },
+    "supplier_vat_number": { "type": "string" },
+    "contact_email": { "type": "string" },
+    "item_description": { "type": "string", "required": true },
+    "packaging_level": { "type": "enum", "values": ["sales", "grouped", "transport"] },
+    "primary_material": { "type": "enum", "ref": "materials" },
+    "coating_present": { "type": "boolean" },
+    "coating_type": { "type": "string", "visible_if": "coating_present == true" },
+    "pfas_intentionally_added": { "type": "boolean", "required": true },
+    "pfas_concentration_ppm": { "type": "number", "visible_if": "pfas_intentionally_added == true" },
+    "bpa_status": { "type": "enum", "values": ["none_used", "bisphenols_listed", "not_applicable"] },
+    "bpa_transition_route": { "type": "enum", "values": ["main", "reusable", "single_use_derogation", "none"] },
+    "declaration_date": { "type": "date", "required": true },
+    "declaration_signatory": { "type": "string", "required": true }
+  },
+
+  "checks": [
+    {
+      "id": "COMP-001",
+      "type": "required_fields",
+      "severity": "blocker",
+      "applies_to": "always",
+      "params": {
+        "fields": [
+          "supplier_legal_name",
+          "item_description",
+          "primary_material",
+          "declaration_date",
+          "declaration_signatory"
+        ]
+      },
+      "message": "Missing required declaration field: {{field}}."
+    },
+    {
+      "id": "COMP-010",
+      "type": "conditional_document",
+      "severity": "blocker",
+      "applies_to": "item.food_contact == true",
+      "params": { "doc_type": "doc" },
+      "message": "No declaration of conformity was uploaded for this item."
+    },
+    {
+      "id": "VAL-020",
+      "type": "date_window",
+      "severity": "gap",
+      "applies_to": "always",
+      "params": { "field": "declaration_date", "max_age_months": 24 },
+      "message": "The declaration is dated {{value}}, older than the {{max_age_months}} month limit."
+    },
+    {
+      "id": "VAL-021",
+      "type": "regex_match",
+      "severity": "advisory",
+      "applies_to": "always",
+      "params": { "field": "supplier_vat_number", "pattern": "^[A-Z]{2}[0-9A-Z]{8,12}$" },
+      "message": "The VAT number {{value}} does not look like an EU VAT identification number."
+    },
+    {
+      "id": "CONS-030",
+      "type": "cross_field",
+      "severity": "blocker",
+      "applies_to": "item.food_contact == true",
+      "params": {
+        "expression": "pfas_intentionally_added == false || pfas_concentration_ppm != null"
+      },
+      "message": "PFAS were declared as intentionally added but no concentration was given."
+    },
+    {
+      "id": "CONS-031",
+      "type": "cross_field",
+      "severity": "gap",
+      "applies_to": "always",
+      "params": { "expression": "coating_present == false || coating_type != null" },
+      "message": "A coating was declared but its type was not specified."
+    },
+    {
+      "id": "BPA-040",
+      "type": "conditional_document",
+      "severity": "blocker",
+      "applies_to": "item.food_contact == true && primary_material in ['plastic','composite','metal']",
+      "params": { "doc_type": "bpa_declaration" },
+      "message": "A bisphenol declaration is required for this material and was not provided."
+    },
+    {
+      "id": "BPA-041",
+      "type": "enum_consistency",
+      "severity": "gap",
+      "applies_to": "bpa_status != 'not_applicable'",
+      "params": { "field": "bpa_transition_route", "not_values": ["none"] },
+      "message": "No transition route was selected for the bisphenol declaration."
+    }
+  ]
+}

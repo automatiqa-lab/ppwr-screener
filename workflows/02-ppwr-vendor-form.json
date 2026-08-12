@@ -1,0 +1,998 @@
+{
+  "name": "ppwr-vendor-form",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ppwr-vendor-form\n\nThe questionnaire the supplier sees.\n\n**Page 1 asks for nothing.** A Form Trigger renders its first page before any node runs, so there is no way to check the token first. Page 1 carries a hidden token and one confirmation box. Somebody following a dead link clicks once and gets a neutral page. Nothing is asked for and nothing leaks.\n\n**Then two checks.** The signature proves we minted the token. `sha256(token)` against the stored hash proves it is the live one. Either failing gives the same neutral page, so probing the difference tells you nothing.\n\n**Page 2 is generated from the ruleset.** Fields come from `field_catalogue`, so adding a question means editing one JSON file.\n\n**Uploads are recorded before anything is validated.** The submission row is written as `writing`, each file goes to `ppwr-evidence` and gets a `document` row pointing at the address it landed on, and only then does the submission flip to `committed`.\n\nBytes first, row second. A row whose file never landed is a dangling reference; a file with no row is garbage a sweep can pick up. A submission left at `writing` looks half finished, which is what it is.",
+        "height": 700,
+        "width": 470,
+        "color": 1
+      },
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Verify\n\nDecode, re-sign, re-hash, look up. Nothing about the item is read out of the token. It only says which row to fetch.",
+        "height": 300,
+        "width": 720,
+        "color": 7
+      },
+      "name": "Lane: Verify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -380,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "path": "ppwr-vendor-form",
+        "formTitle": "Packaging declaration",
+        "formDescription": "Confirm you are authorised to complete this declaration. The next pages ask about the packaging item and its materials.\n\nThis form screens your declaration for completeness and internal consistency. It is not a conformity assessment, it is not legal advice, and it is not a substitute for a technical file or a notified body.\n\nYou are working with an AI agent. It drafts; you decide what stays.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "t",
+              "fieldType": "hiddenField",
+              "fieldName": "t"
+            },
+            {
+              "fieldLabel": "I am authorised to complete this declaration for my company",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  }
+                ]
+              },
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "buttonLabel": "Continue"
+        }
+      },
+      "name": "Vendor questionnaire (page 1: identity)",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -820,
+        420
+      ],
+      "webhookId": "ppwr-vendor-form",
+      "notes": "Asks for nothing, so an invalid token cannot leak anything. The Art. 50 interaction line is in the description because a supplier filling in a packaging form has no other way to know a model will read their upload."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - split the token into its three parts\n//\n// The token is <campaign_item_id>.<expires_ms>.<signature>. Nothing here is trusted: the parts\n// are only used to rebuild the payload the signature should cover and to look up a row. A forged\n// token gets as far as a database miss and no further.\n\nconst submitted = $input.first().json || {};\n\n// The hidden field's key depends on how the Form Trigger names it, and guessing wrong would make\n// every token look malformed. Take the declared name if it is there, otherwise find the one value\n// on the item that has the shape of a token.\nfunction findToken(source) {\n  for (const key of ['t', 'token', 'T']) {\n    if (typeof source[key] === 'string' && source[key].trim() !== '') return source[key].trim();\n  }\n  for (const value of Object.values(source)) {\n    if (typeof value === 'string' && /^[^.]+\\.\\d+\\.[^.]+$/.test(value.trim())) return value.trim();\n  }\n  return '';\n}\n\nconst raw = findToken(submitted);\nconst parts = raw.split('.');\nconst wellFormed =\n  parts.length === 3 && parts[0].length > 0 && /^\\d+$/.test(parts[1]) && parts[2].length > 0;\n\nif (!wellFormed) {\n  // A placeholder payload, not a shortcut. The Crypto node downstream throws on an undefined\n  // input, so a malformed token would crash before the verifier could reject it politely. This\n  // signs a constant that can never match a real signature, and the verdict node does the work.\n  return [\n    {\n      json: {\n        token_ok: false,\n        token: raw,\n        token_payload: 'malformed',\n        presented_signature: '',\n        campaign_item_id: null,\n        expires_ms: 0,\n        expired: true,\n        submitted_keys: Object.keys(submitted),\n      },\n    },\n  ];\n}\n\nconst [campaignItemId, expiresMs, signature] = parts;\n\nreturn [\n  {\n    json: {\n      token: raw,\n      campaign_item_id: campaignItemId,\n      expires_ms: Number(expiresMs),\n      presented_signature: signature,\n      token_payload: campaignItemId + '|' + expiresMs,\n      expired: Number(expiresMs) < Date.now(),\n      token_ok: true,\n    },\n  },\n];"
+      },
+      "name": "Decode token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -580,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.token_payload }}",
+        "dataPropertyName": "expected_sig",
+        "encoding": "base64"
+      },
+      "name": "Recompute signature",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        -340,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "value": "={{ $json.token }}",
+        "dataPropertyName": "token_hash",
+        "encoding": "hex"
+      },
+      "name": "Hash presented token",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        -100,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "query",
+            "entity": "campaign_item",
+            "where": "={{ [ { field: 'token_hash', op: 'eq', value: $json.token_hash } ] }}",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Load campaign item by token hash",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        140,
+        420
+      ],
+      "notes": "Looked up by hash, not by the id inside the token. A token whose id was tampered with will not match any stored hash.\n\nMode is 'each'. The store answers one request per call."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - decide whether this link may proceed\n//\n// Four questions, and the visitor is told the answer to none of them. A probe that can tell\n// \"expired\" from \"never existed\" from \"wrong signature\" learns which ids are real.\n\nconst decoded = $('Decode token').first().json;\nconst hashed = $('Hash presented token').first().json;\nconst lookup = $input.first().json;\n\nconst row = lookup && lookup.ok && lookup.rows && lookup.rows.length === 1 ? lookup.rows[0] : null;\n\n// Constant time is not achievable in a Code node and is not the threat here: the signature is\n// never revealed, only compared. A plain comparison is honest about what it is.\nconst signatureMatches =\n  decoded.token_ok === true &&\n  String(hashed.expected_sig || '')\n    .replace(/\\+/g, '-')\n    .replace(/\\//g, '_')\n    .replace(/=+$/, '') === decoded.presented_signature;\n\nconst OPEN_STATES = ['invited', 'opened', 'partial', 'gapped'];\n\nconst reasons = [];\nif (!decoded.token_ok) reasons.push('malformed');\nif (!signatureMatches) reasons.push('bad_signature');\nif (decoded.expired) reasons.push('expired');\nif (!row) reasons.push('no_matching_token');\nelse if (!OPEN_STATES.includes(row.state)) reasons.push(`state_${row.state}`);\n\nconst valid = reasons.length === 0;\n\nreturn [\n  {\n    json: {\n      valid,\n      // Kept for the execution log and the operator, never shown to the visitor.\n      reasons,\n      campaign_item_id: row ? row.campaign_item_id : decoded.campaign_item_id,\n      campaign_id: row ? row.campaign_id : null,\n      item_id: row ? row.item_id : null,\n      state: row ? row.state : null,\n      next_revision: row ? row.next_revision : null,\n      token: decoded.token,\n    },\n  },\n];"
+      },
+      "name": "Token valid?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "Proceed or stop",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        620,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "This link is no longer available",
+        "completionMessage": "Please ask your contact at the buying company for a new link.\n\nIf you believe this is a mistake, reply to the email that brought you here.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Link no longer available",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        620
+      ],
+      "notes": "One neutral page for every failure. Expired, forged, reissued and already closed all look identical from outside."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "transition",
+            "transition": "={{ { campaign_item_id: $json.campaign_item_id, from_state: $json.state, to_state: 'opened', event_type: 'form_opened', actor: 'vendor' } }}",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Transition to opened",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        300
+      ],
+      "notes": "Soft: a supplier who opens the form twice is not an error, and the second transition is a no-op the state machine refuses.\n\nMode is 'each'."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "get",
+            "entity": "packaging_item",
+            "key": "={{ { item_id: $('Token valid?').first().json.item_id } }}",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Load packaging item",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - build page 2 from the ruleset field catalogue\n//\n// The form does not hardcode its questions. Adding a field to the catalogue adds it here, which\n// is the same promise the rule engine makes: change one JSON file, change nothing else.\n//\n// The catalogue is inlined for now. Once the campaign carries a frozen ruleset, this reads it\n// from the store instead and the two can never drift.\n\nconst item = ($input.first().json || {}).row || {};\nconst foodContact = item.food_contact === true;\n\nconst CATALOGUE = {\n  supplier_legal_name: { label: 'Supplier legal name', type: 'text', required: true },\n  supplier_vat_number: { label: 'VAT number', type: 'text' },\n  item_description: { label: 'Item description', type: 'text', required: true },\n  packaging_level: { label: 'Packaging level', type: 'dropdown', values: ['sales', 'grouped', 'transport'] },\n  primary_material: {\n    label: 'Primary material',\n    type: 'dropdown',\n    values: ['paper_board', 'plastic', 'glass', 'metal', 'wood', 'composite', 'other'],\n    required: true,\n  },\n  coating_present: { label: 'Is a coating present?', type: 'dropdown', values: ['yes', 'no'] },\n  coating_type: { label: 'Coating type, if any', type: 'text' },\n  pfas_intentionally_added: {\n    label: 'Were PFAS intentionally added?',\n    type: 'dropdown',\n    values: ['yes', 'no'],\n    required: true,\n    foodContactOnly: true,\n  },\n  pfas_concentration_ppm: { label: 'PFAS concentration in ppm, if added', type: 'number', foodContactOnly: true },\n  bpa_status: {\n    label: 'Bisphenol status',\n    type: 'dropdown',\n    values: ['none_used', 'bisphenols_listed', 'not_applicable'],\n    foodContactOnly: true,\n  },\n  bpa_transition_route: {\n    label: 'Bisphenol transition route',\n    type: 'dropdown',\n    values: ['main', 'reusable', 'single_use_derogation', 'none'],\n    foodContactOnly: true,\n  },\n  declaration_date: { label: 'Declaration date', type: 'date', required: true },\n  declaration_signatory: { label: 'Who signed the declaration', type: 'text', required: true },\n};\n\nconst fields = [];\nfor (const [name, spec] of Object.entries(CATALOGUE)) {\n  // Substance questions only reach a supplier whose item touches food. Asking a carton maker\n  // about bisphenols is how a form earns a reputation for wasting time.\n  if (spec.foodContactOnly && !foodContact) continue;\n\n  const field = {\n    fieldLabel: spec.label,\n    fieldName: name,\n    fieldType: spec.type,\n    requiredField: spec.required === true,\n  };\n  if (spec.type === 'dropdown') {\n    field.fieldOptions = { values: spec.values.map((v) => ({ option: v })) };\n  }\n  fields.push(field);\n}\n\nreturn [\n  {\n    json: {\n      food_contact: foodContact,\n      item_description: item.description || null,\n      internal_sku: item.internal_sku || null,\n      form_fields: fields,\n    },\n  },\n];"
+      },
+      "name": "Build page 2 fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "defineForm": "json",
+        "jsonOutput": "={{ JSON.stringify($json.form_fields) }}",
+        "options": {
+          "formTitle": "Packaging item and materials",
+          "formDescription": "=Item {{ $json.internal_sku }}: {{ $json.item_description }}\n\nAnswer what you can. Anything left blank comes back to you as a named gap rather than a rejection.",
+          "appendAttribution": false,
+          "buttonLabel": "Continue"
+        }
+      },
+      "name": "Page 2: item and materials",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "defineForm": "fields",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Declaration of conformity and any test reports",
+              "fieldName": "documents",
+              "fieldType": "file",
+              "multipleFiles": true,
+              "acceptFileTypes": ".pdf,.png,.jpg,.jpeg"
+            },
+            {
+              "fieldLabel": "I confirm the information above is accurate to the best of my knowledge",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  }
+                ]
+              },
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "formTitle": "Evidence and attestation",
+          "formDescription": "Attach the declaration of conformity and any supporting test reports.\n\nYour answers are screened for completeness and internal consistency. This is not a conformity assessment, it is not legal advice, and it is not a substitute for a technical file or a notified body.\n\nYou are working with an AI agent. It drafts; you decide what stays.",
+          "appendAttribution": false,
+          "buttonLabel": "Submit declaration"
+        }
+      },
+      "name": "Page 3: evidence and attestation",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1840,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - collect the answers into one submission payload\n//\n// Page 2's field names come from the catalogue, so whatever the supplier answered lands here\n// under the same names the rule engine expects. Nothing is renamed on the way through.\n\nconst verified = $('Token valid?').first().json;\nconst page2 = $('Page 2: item and materials').first().json || {};\nconst page3 = $input.first().json || {};\n\nconst KNOWN = [\n  'supplier_legal_name', 'supplier_vat_number', 'item_description', 'packaging_level',\n  'primary_material', 'coating_present', 'coating_type', 'pfas_intentionally_added',\n  'pfas_concentration_ppm', 'bpa_status', 'bpa_transition_route', 'declaration_date',\n  'declaration_signatory',\n];\n\nconst rawPayload = {};\nfor (const name of KNOWN) {\n  if (page2[name] === undefined || page2[name] === '') continue;\n  rawPayload[name] = page2[name];\n}\n\n// The form gives yes and no for booleans. The engine's value domain understands both, so they\n// are passed through rather than translated here: one place decides what a boolean is.\n\nconst binaryKeys = Object.keys(page3).filter((k) => k !== 'submittedAt' && k !== 'formMode');\n\nreturn [\n  {\n    json: {\n      campaign_item_id: verified.campaign_item_id,\n      revision: verified.next_revision || 1,\n      raw_payload: rawPayload,\n      submitted_by: rawPayload.declaration_signatory || null,\n      answered_fields: Object.keys(rawPayload).length,\n      attachment_keys: binaryKeys,\n    },\n  },\n];"
+      },
+      "name": "Assemble submission",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "entity": "submission",
+            "mode": "upsert",
+            "data": "={{ { campaign_item_id: $json.campaign_item_id, revision: $json.revision, commit_state: 'writing', submitted_at: new Date().toISOString(), submitted_by: $json.submitted_by, raw_payload: $json.raw_payload } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Insert submission",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2320,
+        300
+      ],
+      "notes": "Written as commit_state 'writing' first. It becomes 'committed' once the documents are attached, so a half written submission is visible as one instead of passing for complete.\n\nMode is 'each'."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "transition",
+            "transition": "={{ { campaign_item_id: $('Assemble submission').first().json.campaign_item_id, submission_id: $('Split uploaded files').first().json.submission_id, to_state: 'submitted', event_type: 'submission_received', actor: 'vendor', payload: { revision: $('Assemble submission').first().json.revision, answered_fields: $('Assemble submission').first().json.answered_fields } } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Transition to submitted",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4080,
+        460
+      ],
+      "notes": "Mode is 'each'."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-intake-check",
+          "cachedResultName": "ppwr-intake-check"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "campaign_item_id": "={{ $('Assemble submission').first().json.campaign_item_id }}",
+            "submission_id": "={{ $('Split uploaded files').first().json.submission_id }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        },
+        "mode": "once"
+      },
+      "name": "Screen the submission",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        4240,
+        460
+      ],
+      "notes": "Started, not waited for. Screening reads documents through a model and can take a while, and a supplier who has finished the form should not be watching a spinner for it.\n\nThe submission is already durable at this point: rows written, documents stored, state moved to 'submitted'. If 03 fails, the error handler moves the item to 'error' and an operator hears about it, instead of the supplier seeing a stack trace on a thank you page."
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Declaration received",
+        "completionMessage": "Thank you. We will come back to you only if something is missing or inconsistent.\n\nThis submission has been screened for completeness and internal consistency. That is not a conformity assessment, and it does not confirm that your packaging conforms to any regulation.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Submission received",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        4400,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - one item per uploaded file\n//\n// Files are recorded before anything is screened. A supplier who uploads four documents and then\n// trips a validation rule must not have to find and attach them again, so the evidence is\n// captured the moment it arrives and the verdict comes later.\n//\n// A submission with no attachments is normal, not an error: the rule engine decides whether a\n// missing document is a gap, and it needs a submission row to say so against.\n//\n// Neither the hash nor the byte count is computed here. Both come back from ppwr-evidence, which\n// derives them from the bytes it actually wrote. n8n reports a binary's size as a human string\n// such as \"212 kB\", and a rounded byte count in an audit record is a number nobody can check.\n\nconst submissionId = $input.first().json.row ? $input.first().json.row.submission_id : null;\nif (!submissionId) throw new Error('No submission row to attach documents to.');\n\nconst page = $('Page 3: evidence and attestation').first();\nconst binaries = page.binary || {};\nconst names = Object.keys(binaries);\n\nif (names.length === 0) {\n  return [{ json: { submission_id: submissionId, no_documents: true } }];\n}\n\nreturn names.map((key) => ({\n  json: {\n    submission_id: submissionId,\n    binary_key: key,\n    filename: binaries[key].fileName || key,\n    mime_type: binaries[key].mimeType || null,\n    // Every upload is filed as `other` until extraction reads it. Guessing a doc_type from a\n    // filename would put a supplier's invoice in the declaration slot and pass the check.\n    doc_type: 'other',\n  },\n  binary: { data: binaries[key] },\n}));"
+      },
+      "name": "Split uploaded files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.no_documents }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "notExists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "Any files attached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2800,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "binaryPropertyName": "data",
+        "destinationKey": "content_b64",
+        "options": {}
+      },
+      "name": "Upload to Base64",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        380
+      ],
+      "notes": "Base64 and not binary crosses the sub-workflow boundary, so this workflow never handles binary plumbing on behalf of the evidence store."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-evidence",
+          "cachedResultName": "ppwr-evidence"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "filename": "={{ $json.filename }}",
+            "mime_type": "={{ $json.mime_type }}",
+            "content_b64": "={{ $json.content_b64 }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Store evidence",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3360,
+        380
+      ],
+      "notes": "The bytes are written before the row that points at them. A document row whose file never landed is a dangling reference; a file with no row is garbage that a sweep can collect.\n\nContent addressed. A resubmission that re-attaches an unchanged document resolves to the same address, so the same bytes are never filed twice.\n\nMode is 'each'. The evidence store answers one request per call."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - pair each stored file with the upload it came from\n//\n// The evidence store answers with an address, a digest and a measured size, and knows nothing\n// about submissions. The split node knows the submission and the declared filename. Neither\n// half is a complete document row.\n//\n// Paired by position rather than by n8n's paired item tracking: the Execute Workflow node runs\n// once per item and returns them in order, and an index is something this code can assert on.\n\nconst uploads = $('Split uploaded files').all().map((item) => item.json);\nconst stored = $input.all().map((item) => item.json);\n\nif (stored.length !== uploads.length) {\n  throw new Error(\n    `The evidence store answered for ${stored.length} of ${uploads.length} uploads. Refusing to write document rows that would point at the wrong files.`\n  );\n}\n\nreturn stored.map((evidence, index) => {\n  const upload = uploads[index];\n  if (!evidence || !evidence.uri || !evidence.sha256) {\n    throw new Error(`The evidence store returned no address for '${upload.filename}'.`);\n  }\n  return {\n    json: {\n      submission_id: upload.submission_id,\n      doc_type: upload.doc_type,\n      filename: upload.filename,\n      mime_type: evidence.mime_type || upload.mime_type,\n      byte_size: evidence.byte_size,\n      sha256: evidence.sha256,\n      storage_uri: evidence.uri,\n    },\n  };\n});"
+      },
+      "name": "Document row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "entity": "document",
+            "mode": "insert",
+            "data": "={{ { submission_id: $json.submission_id, doc_type: $json.doc_type, filename: $json.filename, mime_type: $json.mime_type, byte_size: $json.byte_size, sha256: $json.sha256, storage_uri: $json.storage_uri } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Record document",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3680,
+        380
+      ],
+      "notes": "The row is the durable record: filename, measured size, content hash, and the address the bytes were written to.\n\nMode is 'each'. The store answers one request per call."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "entity": "submission",
+            "mode": "update",
+            "where": "={{ [ { field: 'submission_id', op: 'eq', value: $('Split uploaded files').first().json.submission_id } ] }}",
+            "data": "={{ { commit_state: 'committed' } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Mark submission committed",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3840,
+        460
+      ],
+      "notes": "Promoted only once every document row exists. A submission stuck at 'writing' is a half written one, and the integrity scan treats it as a failure instead of as data.\n\nMode is 'each'. The store answers one request per call."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - put the metadata back on the payload\n//\n// Verified against a live instance: extractFromFile replaces the item json with just its\n// destination key, so the filename and mime type the split node worked out are gone by the time\n// the evidence store is called. They are read back from the split node and paired by position.\n//\n// Position rather than n8n's paired item tracking, for the same reason the document rows are:\n// the nodes in between run once per item and return them in order, and an index is something\n// this code can assert on.\n\nconst uploads = $('Split uploaded files').all().map((item) => item.json);\nconst payloads = $input.all().map((item) => item.json);\n\nif (payloads.length !== uploads.length) {\n  throw new Error(\n    `Converted ${payloads.length} of ${uploads.length} uploads to base64. Refusing to store bytes under the wrong filename.`\n  );\n}\n\nreturn payloads.map((payload, index) => ({\n  json: {\n    filename: uploads[index].filename,\n    mime_type: uploads[index].mime_type,\n    content_b64: payload.content_b64,\n  },\n}));"
+      },
+      "name": "Evidence put request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "entity": "campaign_item",
+            "mode": "update",
+            "where": "={{ [ { field: 'campaign_item_id', op: 'eq', value: $('Assemble submission').first().json.campaign_item_id } ] }}",
+            "data": "={{ { next_revision: $('Assemble submission').first().json.revision + 1, current_submission_id: $('Split uploaded files').first().json.submission_id } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Consume the revision",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3920,
+        460
+      ],
+      "notes": "The allocator moves on as soon as a revision is used. Without this a supplier answering a gap notice writes revision 1 again, the upsert overwrites what they sent the first time, and 'a resubmission is a new revision, nothing is overwritten' stops being true.\n\nMode is 'each'. The store answers one request per call."
+    }
+  ],
+  "connections": {
+    "Vendor questionnaire (page 1: identity)": {
+      "main": [
+        [
+          {
+            "node": "Decode token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decode token": {
+      "main": [
+        [
+          {
+            "node": "Recompute signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recompute signature": {
+      "main": [
+        [
+          {
+            "node": "Hash presented token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash presented token": {
+      "main": [
+        [
+          {
+            "node": "Load campaign item by token hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load campaign item by token hash": {
+      "main": [
+        [
+          {
+            "node": "Token valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Token valid?": {
+      "main": [
+        [
+          {
+            "node": "Proceed or stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proceed or stop": {
+      "main": [
+        [
+          {
+            "node": "Transition to opened",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Link no longer available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transition to opened": {
+      "main": [
+        [
+          {
+            "node": "Load packaging item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load packaging item": {
+      "main": [
+        [
+          {
+            "node": "Build page 2 fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build page 2 fields": {
+      "main": [
+        [
+          {
+            "node": "Page 2: item and materials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Page 2: item and materials": {
+      "main": [
+        [
+          {
+            "node": "Page 3: evidence and attestation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Page 3: evidence and attestation": {
+      "main": [
+        [
+          {
+            "node": "Assemble submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble submission": {
+      "main": [
+        [
+          {
+            "node": "Insert submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert submission": {
+      "main": [
+        [
+          {
+            "node": "Split uploaded files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transition to submitted": {
+      "main": [
+        [
+          {
+            "node": "Screen the submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Screen the submission": {
+      "main": [
+        [
+          {
+            "node": "Submission received",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split uploaded files": {
+      "main": [
+        [
+          {
+            "node": "Any files attached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any files attached?": {
+      "main": [
+        [
+          {
+            "node": "Upload to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark submission committed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Base64": {
+      "main": [
+        [
+          {
+            "node": "Evidence put request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store evidence": {
+      "main": [
+        [
+          {
+            "node": "Document row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Document row": {
+      "main": [
+        [
+          {
+            "node": "Record document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record document": {
+      "main": [
+        [
+          {
+            "node": "Mark submission committed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark submission committed": {
+      "main": [
+        [
+          {
+            "node": "Consume the revision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evidence put request": {
+      "main": [
+        [
+          {
+            "node": "Store evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consume the revision": {
+      "main": [
+        [
+          {
+            "node": "Transition to submitted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "PPWR_REF:ppwr-error-handler"
+  }
+}

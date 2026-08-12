@@ -1,0 +1,39 @@
+# PPWR Compliance Screener
+
+> Screens supplier packaging declarations for completeness and internal consistency against a
+> versioned JSON ruleset. Not a conformity assessment.
+
+## What it is
+
+A supplier data collection tool for EU packaging conformity. A company sends each packaging supplier
+a tokenised link; the supplier answers a material-adaptive questionnaire and uploads evidence; a
+deterministic rule engine screens the submission and returns either a confirmation or a named list of
+what is missing. Output is a per-item evidence bundle and a coverage report that can sit behind a
+Declaration of Conformity.
+
+## What it is not
+
+Not a conformity assessment. Not legal advice. Not a substitute for a technical file, a notified body
+or a competent authority. It screens documents for completeness and internal consistency; it does not
+determine whether packaging conforms to Regulation (EU) 2025/40.
+
+## Design
+
+- n8n carries invites, tokens, reminders, escalation and state. PostgreSQL holds campaign state.
+- A language model does exactly two bounded jobs: reading an uploaded document into structured
+  fields, and writing the covering paragraph of a gap notice.
+- No model produces a pass or a fail. Verdicts come from a rule engine over versioned JSON.
+- Adding a check means editing one JSON file, not adding a node.
+- Submissions are append-only; the same submission against the same ruleset version always produces
+  the same findings.
+
+## Links
+
+- Project page: https://www.automatiqa.io/ppwr-screener/
+- Repository: https://github.com/automatiqa-lab/ppwr-screener
+- Compliance and EU AI Act classification: https://github.com/automatiqa-lab/ppwr-screener/blob/main/COMPLIANCE.md
+- Lab: https://www.automatiqa.io
+
+## Licence
+
+MIT. Author: Aleks Sidorecs.

@@ -1,0 +1,270 @@
+{
+  "name": "ppwr-error-handler",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ppwr-error-handler\n\nEvery workflow here points at this as its error workflow. Without one place for failures to land, \"fail loud\" is a convention that quietly stops being followed.\n\nWhat it does:\n\n1. Pulls the failing node, the message and the execution URL out of the error payload.\n2. Finds the campaign item, if the failure carried one.\n3. Moves that item to `error` and writes an `event_log` row, so the failure is in the audit trail and not only in n8n's execution list.\n4. Alerts the operator.\n\nAn item in `error` is not stuck. The state machine allows `error` back to `pending`, `invited` or `submitted` once somebody has looked at it.",
+        "height": 560,
+        "width": 440,
+        "color": 1
+      },
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -620,
+        -120
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -140,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - pull the useful parts out of an error payload\n//\n// n8n nests the interesting fields three levels down and the shape moves between versions, so\n// every read is defensive. A missing field must not turn an error report into a second error.\n\nconst payload = $input.first().json || {};\nconst execution = payload.execution || {};\nconst workflow = payload.workflow || {};\nconst error = execution.error || payload.error || {};\n\nconst failingNode = (error.node && error.node.name) || execution.lastNodeExecuted || null;\n\n// The failure is only attributable to a supplier if the failing item carried an id. Search the\n// error payload rather than guessing, and accept that many failures are not attributable.\nfunction findId(value, key, depth) {\n  if (depth > 6 || value === null || value === undefined) return null;\n  if (Array.isArray(value)) {\n    for (const entry of value) {\n      const hit = findId(entry, key, depth + 1);\n      if (hit) return hit;\n    }\n    return null;\n  }\n  if (typeof value !== 'object') return null;\n  if (typeof value[key] === 'string' && value[key] !== '') return value[key];\n  for (const nested of Object.values(value)) {\n    const hit = findId(nested, key, depth + 1);\n    if (hit) return hit;\n  }\n  return null;\n}\n\nreturn [\n  {\n    json: {\n      workflow_name: workflow.name || null,\n      workflow_id: workflow.id || null,\n      execution_id: execution.id || null,\n      execution_url: execution.url || null,\n      failing_node: failingNode,\n      message: error.message || 'Unknown error',\n      stack: error.stack || null,\n      campaign_item_id: findId(payload, 'campaign_item_id', 0),\n      submission_id: findId(payload, 'submission_id', 0),\n      occurred_at: new Date().toISOString(),\n      // Only the fallback. The address an operator actually wants is written into the meta\n      // table and read by the next node, so setting it is not a repo change. This one stays a\n      // placeholder because an address belonging to whoever built this is an address that keeps\n      // receiving a forker's alerts.\n      operator_email: 'operator@example.com',\n    },\n  },\n];"
+      },
+      "name": "Extract failure context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "query",
+            "entity": "meta",
+            "match": "all",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Load alert settings",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        340,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Where the alert goes, read from the meta table so changing it is not a deploy.\n\nSoft, and set to carry on when it errors. This is the error workflow: a store that is itself broken is one of the things it exists to report, and a failed read here must not be the reason nobody hears about it. The fallback address is on the item.\n\nMode is 'each'."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.campaign_item_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "Attributable to an item?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "transition",
+            "transition": "={{ { campaign_item_id: $json.campaign_item_id, submission_id: $json.submission_id, to_state: 'error', event_type: 'node_error', actor: 'system', payload: { workflow: $json.workflow_name, node: $json.failing_node, message: $json.message, execution_url: $json.execution_url } } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Move item to error",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        860,
+        100
+      ],
+      "notes": "Mode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call, so anything after the first would be dropped and nothing said about it."
+    },
+    {
+      "parameters": {},
+      "name": "Not attributable",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        860,
+        320
+      ],
+      "notes": "The failure is real and still in n8n's execution list. There is just no supplier to attach it to."
+    },
+    {
+      "parameters": {
+        "content": "### Operator alert\n\nSends through Outlook, to whichever address is in the meta table under `operator_email`.\n\nThe event_log row is written whether or not the mail goes out, so a failed alert costs you the notice, not the record.",
+        "height": 260,
+        "width": 320,
+        "color": 7
+      },
+      "name": "Lane: Alert",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        860,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "subject": "=PPWR Screener failure: {{ $('Extract failure context').first().json.workflow_name }}",
+        "bodyContent": "={{ $('Extract failure context').first().json.message }}\n\nWorkflow: {{ $('Extract failure context').first().json.workflow_name }}\nNode: {{ $('Extract failure context').first().json.failing_node }}\nExecution: {{ $('Extract failure context').first().json.execution_url }}\nCampaign item: {{ $('Extract failure context').first().json.campaign_item_id }}\n\nIf the failure named an item it has been moved to the error state, and the state machine allows it back to pending, invited or submitted once the cause is fixed.",
+        "toRecipients": "={{ (($('Load alert settings').first().json.rows || []).find(r => r.key === 'operator_email') || {}).value || $('Extract failure context').first().json.operator_email }}",
+        "additionalFields": {
+          "bodyContentType": "Text"
+        }
+      },
+      "name": "Alert operator",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "notes": "Set the address once by writing an operator_email row into the meta table. Until somebody does, this sends to the placeholder in Extract failure context and bounces, which is at least loud."
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Extract failure context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract failure context": {
+      "main": [
+        [
+          {
+            "node": "Load alert settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attributable to an item?": {
+      "main": [
+        [
+          {
+            "node": "Move item to error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not attributable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move item to error": {
+      "main": [
+        [
+          {
+            "node": "Alert operator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not attributable": {
+      "main": [
+        [
+          {
+            "node": "Alert operator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load alert settings": {
+      "main": [
+        [
+          {
+            "node": "Attributable to an item?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

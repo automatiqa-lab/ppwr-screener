@@ -1,0 +1,17 @@
+{
+  "_comment": "Transcribed verbatim from the lab's canonical wording file, version 2, schema automatiqa-disclosure/1. Strings are not edited here. A change is made in the canonical file first and propagated on the next release, because wording that carries a legal claim belongs in one reviewable place.",
+  "version": 2,
+  "schema": "automatiqa-disclosure/1",
+  "interactive": {
+    "session_notice": "You are working with an AI agent. It drafts; you decide what stays."
+  },
+  "document": {
+    "drafted": "AI-assisted · {drafted} of {total} items drafted by the agent, accepted by the author",
+    "unreviewed": "AI-assisted · {drafted} drafted by the agent · {pending} still pencil, not reviewed",
+    "none": ""
+  },
+  "deployer": {
+    "notice": "This output contains AI-generated content and carries machine-readable marking. If you redistribute it in the EU you are a deployer under the EU AI Act - keep the marking intact."
+  },
+  "contact": "aleks@automatiqa.io"
+}

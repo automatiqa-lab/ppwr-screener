@@ -1,0 +1,513 @@
+{
+  "name": "ppwr-evidence",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ppwr-evidence\n\nStores the files suppliers upload, and hands them back by address.\n\n`ppwr-store` keeps the rows. This keeps the bytes those rows point at. A document row whose file vanished when the execution ended is not much of an audit trail.\n\n**Contract**\n\nIn: `{ op, uri, filename, mime_type, content_b64, request_id }`\n\nOut: `{ ok, uri, sha256, byte_size, mime_type, filename, content_b64, backend, request_id }`\n\nAn address is the content hash, `evidence://<sha256>`, never a path. Paths move. If a row pointed at `/home/node/.n8n/evidence/ab12...` and somebody reorganised the volume, every verdict already reached would lose its evidence.\n\nThe hash is computed here from the bytes, not taken from the caller. On the way back out the file is hashed again and checked against the address it was fetched by. If those disagree the execution fails.\n\nUploading the same file twice costs one write. Same bytes, same address, second write skipped.\n\n**Setup**\n\nEvidence lives under `~/.n8n-files`. n8n 2.x blocks its own `.n8n` folder and confines nodes to that directory unless you set `N8N_RESTRICT_FILE_ACCESS_TO`. Give it a volume so it survives the container:\n\n`- n8n-evidence:/home/node/.n8n-files`\n\nThen once: `docker exec -u node n8n mkdir -p /home/node/.n8n-files/ppwr-evidence`\n\nCode nodes are built from `src/evidence/` by `npm run bundle` and swapped in at deploy. Editing them on the canvas will not survive.",
+        "height": 900,
+        "width": 470,
+        "color": 1
+      },
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1120,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Put\n\nBytes in, address out. The same document uploaded twice resolves to the same file and the second write costs nothing.",
+        "height": 300,
+        "width": 900,
+        "color": 4
+      },
+      "name": "Lane: Put",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Get\n\nAddress in, bytes out, hashed on the way past. A mismatch fails the execution.",
+        "height": 300,
+        "width": 900,
+        "color": 4
+      },
+      "name": "Lane: Get",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "op",
+              "type": "string"
+            },
+            {
+              "name": "uri",
+              "type": "string"
+            },
+            {
+              "name": "filename",
+              "type": "string"
+            },
+            {
+              "name": "mime_type",
+              "type": "string"
+            },
+            {
+              "name": "content_b64",
+              "type": "string"
+            },
+            {
+              "name": "request_id",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "name": "Evidence request",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "backend",
+              "value": "filesystem",
+              "type": "string"
+            },
+            {
+              "name": "evidence_dir",
+              "value": "/home/node/.n8n-files/ppwr-evidence",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -420,
+        60
+      ],
+      "notes": "Under ~/.n8n-files, deliberately. Verified against a live instance: n8n 2.x restricts node file access to that directory by default, and blocks its own .n8n folder outright, so any other path fails with \"Access to the file is not allowed\" until an operator sets N8N_RESTRICT_FILE_ACCESS_TO. This default works on an untouched instance.\n\nIt still has to be a volume, or the evidence behind every verdict dies with the container."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// evidence 1  build 01f3f309ea36\n// Source: src/evidence/ and src/adapters/evidence/. Rebuild with npm run bundle.\n\"use strict\";\nvar PPWR_EVIDENCE = (() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n  };\n\n  // src/evidence/index.js\n  var require_index = __commonJS({\n    \"src/evidence/index.js\"(exports, module) {\n      var EVIDENCE_VERSION = \"1\";\n      var SCHEME = \"evidence://\";\n      var OPS = Object.freeze([\"put\", \"get\"]);\n      var BACKENDS = Object.freeze([\"filesystem\"]);\n      var CODES = Object.freeze({\n        VALIDATION: \"E_EVIDENCE_VALIDATION\",\n        UNSUPPORTED_BACKEND: \"E_EVIDENCE_BACKEND\",\n        INTEGRITY: \"E_EVIDENCE_INTEGRITY\",\n        IO: \"E_EVIDENCE_IO\"\n      });\n      var DIGEST = /^[0-9a-f]{64}$/;\n      var EvidenceError = class extends Error {\n        constructor(code, message, details) {\n          super(message);\n          this.name = \"EvidenceError\";\n          this.code = code;\n          this.details = details || {};\n        }\n      };\n      function fail(code, message, details) {\n        throw new EvidenceError(code, message, details);\n      }\n      function isBlank(value) {\n        return value === null || value === void 0 || String(value).trim() === \"\";\n      }\n      function requireDigest(value, what) {\n        const digest = String(value === void 0 || value === null ? \"\" : value).trim().toLowerCase();\n        if (!DIGEST.test(digest)) {\n          fail(CODES.VALIDATION, `${what} must be a 64 character hex sha256, got '${value}'.`, { value });\n        }\n        return digest;\n      }\n      function buildUri(sha256) {\n        return `${SCHEME}${requireDigest(sha256, \"sha256\")}`;\n      }\n      function parseUri(uri) {\n        const text = String(uri === void 0 || uri === null ? \"\" : uri).trim();\n        if (text === \"\") fail(CODES.VALIDATION, \"A get needs a uri.\", { uri });\n        if (text.toLowerCase().startsWith(SCHEME)) return requireDigest(text.slice(SCHEME.length), \"uri digest\");\n        if (DIGEST.test(text.toLowerCase())) return text.toLowerCase();\n        fail(CODES.VALIDATION, `Unreadable evidence uri '${text}'. Expected ${SCHEME}<sha256>.`, { uri: text });\n        return null;\n      }\n      function joinPath(dir, name) {\n        const base = String(dir === void 0 || dir === null ? \"\" : dir).trim();\n        if (base === \"\") fail(CODES.VALIDATION, \"The evidence backend has no directory configured.\", {});\n        const separator = base.indexOf(\"\\\\\") !== -1 && base.indexOf(\"/\") === -1 ? \"\\\\\" : \"/\";\n        const trimmed = base.replace(/[\\\\/]+$/, \"\");\n        return `${trimmed}${separator}${name}`;\n      }\n      function resolvePath(sha256, options) {\n        const opts = options || {};\n        const backend = opts.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(\n            CODES.UNSUPPORTED_BACKEND,\n            `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`,\n            { backend }\n          );\n        }\n        return joinPath(opts.dir, sha256);\n      }\n      function base64Bytes(text, what) {\n        const raw = String(text === void 0 || text === null ? \"\" : text).replace(/\\s+/g, \"\");\n        if (raw === \"\") fail(CODES.VALIDATION, `${what} is empty.`, {});\n        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || raw.length % 4 !== 0) {\n          fail(CODES.VALIDATION, `${what} is not base64.`, { length: raw.length });\n        }\n        const padding = (raw.match(/=+$/) || [\"\"])[0].length;\n        return raw.length / 4 * 3 - padding;\n      }\n      function planRequest(request, config) {\n        const req = request || {};\n        const cfg = config || {};\n        const op = req.op;\n        if (!OPS.includes(op)) {\n          fail(CODES.VALIDATION, `Unknown op '${op}'. Known: ${OPS.join(\", \")}.`, { op });\n        }\n        const backend = cfg.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(CODES.UNSUPPORTED_BACKEND, `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`, {\n            backend\n          });\n        }\n        const plan = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op,\n          backend,\n          dir: cfg.dir || null,\n          request_id: req.request_id || null\n        };\n        if (op === \"put\") {\n          plan.filename = isBlank(req.filename) ? null : String(req.filename).trim();\n          plan.mime_type = isBlank(req.mime_type) ? \"application/octet-stream\" : String(req.mime_type).trim();\n          plan.byte_size = base64Bytes(req.content_b64, \"content_b64\");\n          return plan;\n        }\n        const sha256 = parseUri(req.uri);\n        plan.sha256 = sha256;\n        plan.uri = buildUri(sha256);\n        plan.path = resolvePath(sha256, { backend, dir: cfg.dir });\n        return plan;\n      }\n      function locatePut(plan, sha256) {\n        const base = plan || {};\n        if (base.op !== \"put\") fail(CODES.VALIDATION, `locatePut expected a put plan, got '${base.op}'.`, { op: base.op });\n        const digest = requireDigest(sha256, \"sha256\");\n        return Object.assign({}, base, {\n          sha256: digest,\n          uri: buildUri(digest),\n          path: resolvePath(digest, { backend: base.backend, dir: base.dir })\n        });\n      }\n      function shapeResponse(plan, result) {\n        const base = plan || {};\n        const raw = result || {};\n        const response = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op: base.op,\n          backend: base.backend,\n          uri: base.uri || null,\n          sha256: base.sha256 || null,\n          filename: base.filename === void 0 ? null : base.filename,\n          mime_type: base.mime_type === void 0 ? null : base.mime_type,\n          byte_size: base.byte_size === void 0 ? null : base.byte_size,\n          request_id: base.request_id || null\n        };\n        if (base.op === \"put\") return response;\n        const observed = requireDigest(raw.sha256, \"sha256 of the stored file\");\n        if (observed !== base.sha256) {\n          fail(\n            CODES.INTEGRITY,\n            `Evidence at ${base.uri} hashes to ${observed}. The bytes behind this record have changed.`,\n            { uri: base.uri, expected: base.sha256, observed }\n          );\n        }\n        response.byte_size = base64Bytes(raw.content_b64, \"content_b64 read back\");\n        response.content_b64 = String(raw.content_b64).replace(/\\s+/g, \"\");\n        return response;\n      }\n      module.exports = {\n        planRequest,\n        locatePut,\n        shapeResponse,\n        buildUri,\n        parseUri,\n        resolvePath,\n        base64Bytes,\n        EvidenceError,\n        EVIDENCE_VERSION,\n        SCHEME,\n        OPS,\n        BACKENDS,\n        CODES\n      };\n    }\n  });\n  return require_index();\n})();\n\n\n// Adapter: evidence-plan\n//\n// First node in ppwr-evidence. Validates the request and decides the route.\n//\n// A get is fully located here: the address carries the digest, so the path is known before any\n// IO happens. A put is not, because its digest is computed from the bytes by the Crypto node\n// instead of being taken from the caller. An address the caller asserts is a claim; an address\n// derived from the content is a fact, and that difference is the whole point of hashing.\n//\n// Configuration arrives on the item, not from $env, for the same reason it does in\n// ppwr-store: Code nodes have environment access blocked by default and n8n Cloud has no custom\n// variables at all.\n//\n// Node settings: JavaScript, Run Once for All Items.\n\nconst request = $input.first().json;\n\nconst plan = PPWR_EVIDENCE.planRequest(request, {\n  backend: request.backend || 'filesystem',\n  dir: request.evidence_dir,\n});\n\nreturn [\n  {\n    json: {\n      _evidence: plan,\n      _route: plan.op,\n      // Read straight off the item by the Convert to File and Read File nodes, so one pair of\n      // nodes serves every caller.\n      content_b64: plan.op === 'put' ? request.content_b64 : null,\n      filename: plan.filename || null,\n      mime_type: plan.mime_type || null,\n      path: plan.path || null,\n      uri: plan.uri || null,\n    },\n  },\n];\n"
+      },
+      "name": "Plan evidence request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        60
+      ],
+      "notes": "Built from src/evidence/. Rebuild with npm run bundle."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json._route }}",
+                    "rightValue": "put",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "put"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json._route }}",
+                    "rightValue": "get",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "get"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Route operation",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -40,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "content_b64",
+        "options": {
+          "fileName": "={{ $json.filename || 'evidence' }}",
+          "mimeType": "={{ $json.mime_type }}"
+        }
+      },
+      "name": "Evidence to binary",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        180,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "dataPropertyName": "sha256",
+        "encoding": "hex"
+      },
+      "name": "Hash uploaded evidence",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -60
+      ],
+      "notes": "The address is derived from the bytes, never taken from the caller."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// evidence 1  build 01f3f309ea36\n// Source: src/evidence/ and src/adapters/evidence/. Rebuild with npm run bundle.\n\"use strict\";\nvar PPWR_EVIDENCE = (() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n  };\n\n  // src/evidence/index.js\n  var require_index = __commonJS({\n    \"src/evidence/index.js\"(exports, module) {\n      var EVIDENCE_VERSION = \"1\";\n      var SCHEME = \"evidence://\";\n      var OPS = Object.freeze([\"put\", \"get\"]);\n      var BACKENDS = Object.freeze([\"filesystem\"]);\n      var CODES = Object.freeze({\n        VALIDATION: \"E_EVIDENCE_VALIDATION\",\n        UNSUPPORTED_BACKEND: \"E_EVIDENCE_BACKEND\",\n        INTEGRITY: \"E_EVIDENCE_INTEGRITY\",\n        IO: \"E_EVIDENCE_IO\"\n      });\n      var DIGEST = /^[0-9a-f]{64}$/;\n      var EvidenceError = class extends Error {\n        constructor(code, message, details) {\n          super(message);\n          this.name = \"EvidenceError\";\n          this.code = code;\n          this.details = details || {};\n        }\n      };\n      function fail(code, message, details) {\n        throw new EvidenceError(code, message, details);\n      }\n      function isBlank(value) {\n        return value === null || value === void 0 || String(value).trim() === \"\";\n      }\n      function requireDigest(value, what) {\n        const digest = String(value === void 0 || value === null ? \"\" : value).trim().toLowerCase();\n        if (!DIGEST.test(digest)) {\n          fail(CODES.VALIDATION, `${what} must be a 64 character hex sha256, got '${value}'.`, { value });\n        }\n        return digest;\n      }\n      function buildUri(sha256) {\n        return `${SCHEME}${requireDigest(sha256, \"sha256\")}`;\n      }\n      function parseUri(uri) {\n        const text = String(uri === void 0 || uri === null ? \"\" : uri).trim();\n        if (text === \"\") fail(CODES.VALIDATION, \"A get needs a uri.\", { uri });\n        if (text.toLowerCase().startsWith(SCHEME)) return requireDigest(text.slice(SCHEME.length), \"uri digest\");\n        if (DIGEST.test(text.toLowerCase())) return text.toLowerCase();\n        fail(CODES.VALIDATION, `Unreadable evidence uri '${text}'. Expected ${SCHEME}<sha256>.`, { uri: text });\n        return null;\n      }\n      function joinPath(dir, name) {\n        const base = String(dir === void 0 || dir === null ? \"\" : dir).trim();\n        if (base === \"\") fail(CODES.VALIDATION, \"The evidence backend has no directory configured.\", {});\n        const separator = base.indexOf(\"\\\\\") !== -1 && base.indexOf(\"/\") === -1 ? \"\\\\\" : \"/\";\n        const trimmed = base.replace(/[\\\\/]+$/, \"\");\n        return `${trimmed}${separator}${name}`;\n      }\n      function resolvePath(sha256, options) {\n        const opts = options || {};\n        const backend = opts.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(\n            CODES.UNSUPPORTED_BACKEND,\n            `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`,\n            { backend }\n          );\n        }\n        return joinPath(opts.dir, sha256);\n      }\n      function base64Bytes(text, what) {\n        const raw = String(text === void 0 || text === null ? \"\" : text).replace(/\\s+/g, \"\");\n        if (raw === \"\") fail(CODES.VALIDATION, `${what} is empty.`, {});\n        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || raw.length % 4 !== 0) {\n          fail(CODES.VALIDATION, `${what} is not base64.`, { length: raw.length });\n        }\n        const padding = (raw.match(/=+$/) || [\"\"])[0].length;\n        return raw.length / 4 * 3 - padding;\n      }\n      function planRequest(request, config) {\n        const req = request || {};\n        const cfg = config || {};\n        const op = req.op;\n        if (!OPS.includes(op)) {\n          fail(CODES.VALIDATION, `Unknown op '${op}'. Known: ${OPS.join(\", \")}.`, { op });\n        }\n        const backend = cfg.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(CODES.UNSUPPORTED_BACKEND, `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`, {\n            backend\n          });\n        }\n        const plan = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op,\n          backend,\n          dir: cfg.dir || null,\n          request_id: req.request_id || null\n        };\n        if (op === \"put\") {\n          plan.filename = isBlank(req.filename) ? null : String(req.filename).trim();\n          plan.mime_type = isBlank(req.mime_type) ? \"application/octet-stream\" : String(req.mime_type).trim();\n          plan.byte_size = base64Bytes(req.content_b64, \"content_b64\");\n          return plan;\n        }\n        const sha256 = parseUri(req.uri);\n        plan.sha256 = sha256;\n        plan.uri = buildUri(sha256);\n        plan.path = resolvePath(sha256, { backend, dir: cfg.dir });\n        return plan;\n      }\n      function locatePut(plan, sha256) {\n        const base = plan || {};\n        if (base.op !== \"put\") fail(CODES.VALIDATION, `locatePut expected a put plan, got '${base.op}'.`, { op: base.op });\n        const digest = requireDigest(sha256, \"sha256\");\n        return Object.assign({}, base, {\n          sha256: digest,\n          uri: buildUri(digest),\n          path: resolvePath(digest, { backend: base.backend, dir: base.dir })\n        });\n      }\n      function shapeResponse(plan, result) {\n        const base = plan || {};\n        const raw = result || {};\n        const response = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op: base.op,\n          backend: base.backend,\n          uri: base.uri || null,\n          sha256: base.sha256 || null,\n          filename: base.filename === void 0 ? null : base.filename,\n          mime_type: base.mime_type === void 0 ? null : base.mime_type,\n          byte_size: base.byte_size === void 0 ? null : base.byte_size,\n          request_id: base.request_id || null\n        };\n        if (base.op === \"put\") return response;\n        const observed = requireDigest(raw.sha256, \"sha256 of the stored file\");\n        if (observed !== base.sha256) {\n          fail(\n            CODES.INTEGRITY,\n            `Evidence at ${base.uri} hashes to ${observed}. The bytes behind this record have changed.`,\n            { uri: base.uri, expected: base.sha256, observed }\n          );\n        }\n        response.byte_size = base64Bytes(raw.content_b64, \"content_b64 read back\");\n        response.content_b64 = String(raw.content_b64).replace(/\\s+/g, \"\");\n        return response;\n      }\n      module.exports = {\n        planRequest,\n        locatePut,\n        shapeResponse,\n        buildUri,\n        parseUri,\n        resolvePath,\n        base64Bytes,\n        EvidenceError,\n        EVIDENCE_VERSION,\n        SCHEME,\n        OPS,\n        BACKENDS,\n        CODES\n      };\n    }\n  });\n  return require_index();\n})();\n\n\n// Adapter: evidence-locate\n//\n// Second half of a put. The Crypto node has hashed the bytes, so the file finally has an address\n// and a path to be written to.\n//\n// The payload is handed back, not the binary, and the file node converts it again.\n//\n// Verified against a live instance: the Crypto node returns an item with no binary on it, so\n// nothing downstream of a hash can write the bytes it just hashed. Binary survives exactly one\n// hop in n8n, which makes converting twice the cheap fix and carrying it through the impossible\n// one. The same measurement says convertToFile replaces the item json, which is why every value\n// the write needs is read from a named node, not from the item.\n//\n// Runs once per item. A caller that puts four uploads gets four files, and a shared\n// digest between two of them is not a collision but the same document uploaded twice: the write\n// is idempotent and the second one costs nothing.\n//\n// Node settings: JavaScript, Run Once for Each Item.\n\nconst request = $('Plan evidence request').first().json;\nconst located = PPWR_EVIDENCE.locatePut(request._evidence, $json.sha256);\n\nreturn {\n  json: {\n    _evidence: located,\n    path: located.path,\n    uri: located.uri,\n    sha256: located.sha256,\n    content_b64: request.content_b64,\n  },\n};\n"
+      },
+      "name": "Locate evidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        -60
+      ],
+      "notes": "Built from src/evidence/. Rebuild with npm run bundle."
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $('Locate evidence').first().json.path }}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "name": "Write evidence file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $('Plan evidence request').first().json.path }}",
+        "options": {
+          "dataPropertyName": "data"
+        }
+      },
+      "name": "Read evidence file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "dataPropertyName": "sha256",
+        "encoding": "hex"
+      },
+      "name": "Hash stored evidence",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        300
+      ],
+      "notes": "Compared against the address the file was fetched by. A mismatch fails the execution."
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "binaryPropertyName": "data",
+        "destinationKey": "content_b64",
+        "options": {}
+      },
+      "name": "Evidence to Base64",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        620,
+        300
+      ],
+      "notes": "Base64, not binary crosses the sub-workflow boundary, so a caller never handles binary plumbing."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// evidence 1  build 01f3f309ea36\n// Source: src/evidence/ and src/adapters/evidence/. Rebuild with npm run bundle.\n\"use strict\";\nvar PPWR_EVIDENCE = (() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __commonJS = (cb, mod) => function __require() {\n    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n  };\n\n  // src/evidence/index.js\n  var require_index = __commonJS({\n    \"src/evidence/index.js\"(exports, module) {\n      var EVIDENCE_VERSION = \"1\";\n      var SCHEME = \"evidence://\";\n      var OPS = Object.freeze([\"put\", \"get\"]);\n      var BACKENDS = Object.freeze([\"filesystem\"]);\n      var CODES = Object.freeze({\n        VALIDATION: \"E_EVIDENCE_VALIDATION\",\n        UNSUPPORTED_BACKEND: \"E_EVIDENCE_BACKEND\",\n        INTEGRITY: \"E_EVIDENCE_INTEGRITY\",\n        IO: \"E_EVIDENCE_IO\"\n      });\n      var DIGEST = /^[0-9a-f]{64}$/;\n      var EvidenceError = class extends Error {\n        constructor(code, message, details) {\n          super(message);\n          this.name = \"EvidenceError\";\n          this.code = code;\n          this.details = details || {};\n        }\n      };\n      function fail(code, message, details) {\n        throw new EvidenceError(code, message, details);\n      }\n      function isBlank(value) {\n        return value === null || value === void 0 || String(value).trim() === \"\";\n      }\n      function requireDigest(value, what) {\n        const digest = String(value === void 0 || value === null ? \"\" : value).trim().toLowerCase();\n        if (!DIGEST.test(digest)) {\n          fail(CODES.VALIDATION, `${what} must be a 64 character hex sha256, got '${value}'.`, { value });\n        }\n        return digest;\n      }\n      function buildUri(sha256) {\n        return `${SCHEME}${requireDigest(sha256, \"sha256\")}`;\n      }\n      function parseUri(uri) {\n        const text = String(uri === void 0 || uri === null ? \"\" : uri).trim();\n        if (text === \"\") fail(CODES.VALIDATION, \"A get needs a uri.\", { uri });\n        if (text.toLowerCase().startsWith(SCHEME)) return requireDigest(text.slice(SCHEME.length), \"uri digest\");\n        if (DIGEST.test(text.toLowerCase())) return text.toLowerCase();\n        fail(CODES.VALIDATION, `Unreadable evidence uri '${text}'. Expected ${SCHEME}<sha256>.`, { uri: text });\n        return null;\n      }\n      function joinPath(dir, name) {\n        const base = String(dir === void 0 || dir === null ? \"\" : dir).trim();\n        if (base === \"\") fail(CODES.VALIDATION, \"The evidence backend has no directory configured.\", {});\n        const separator = base.indexOf(\"\\\\\") !== -1 && base.indexOf(\"/\") === -1 ? \"\\\\\" : \"/\";\n        const trimmed = base.replace(/[\\\\/]+$/, \"\");\n        return `${trimmed}${separator}${name}`;\n      }\n      function resolvePath(sha256, options) {\n        const opts = options || {};\n        const backend = opts.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(\n            CODES.UNSUPPORTED_BACKEND,\n            `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`,\n            { backend }\n          );\n        }\n        return joinPath(opts.dir, sha256);\n      }\n      function base64Bytes(text, what) {\n        const raw = String(text === void 0 || text === null ? \"\" : text).replace(/\\s+/g, \"\");\n        if (raw === \"\") fail(CODES.VALIDATION, `${what} is empty.`, {});\n        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw) || raw.length % 4 !== 0) {\n          fail(CODES.VALIDATION, `${what} is not base64.`, { length: raw.length });\n        }\n        const padding = (raw.match(/=+$/) || [\"\"])[0].length;\n        return raw.length / 4 * 3 - padding;\n      }\n      function planRequest(request, config) {\n        const req = request || {};\n        const cfg = config || {};\n        const op = req.op;\n        if (!OPS.includes(op)) {\n          fail(CODES.VALIDATION, `Unknown op '${op}'. Known: ${OPS.join(\", \")}.`, { op });\n        }\n        const backend = cfg.backend || \"filesystem\";\n        if (!BACKENDS.includes(backend)) {\n          fail(CODES.UNSUPPORTED_BACKEND, `Unknown evidence backend '${backend}'. Built: ${BACKENDS.join(\", \")}.`, {\n            backend\n          });\n        }\n        const plan = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op,\n          backend,\n          dir: cfg.dir || null,\n          request_id: req.request_id || null\n        };\n        if (op === \"put\") {\n          plan.filename = isBlank(req.filename) ? null : String(req.filename).trim();\n          plan.mime_type = isBlank(req.mime_type) ? \"application/octet-stream\" : String(req.mime_type).trim();\n          plan.byte_size = base64Bytes(req.content_b64, \"content_b64\");\n          return plan;\n        }\n        const sha256 = parseUri(req.uri);\n        plan.sha256 = sha256;\n        plan.uri = buildUri(sha256);\n        plan.path = resolvePath(sha256, { backend, dir: cfg.dir });\n        return plan;\n      }\n      function locatePut(plan, sha256) {\n        const base = plan || {};\n        if (base.op !== \"put\") fail(CODES.VALIDATION, `locatePut expected a put plan, got '${base.op}'.`, { op: base.op });\n        const digest = requireDigest(sha256, \"sha256\");\n        return Object.assign({}, base, {\n          sha256: digest,\n          uri: buildUri(digest),\n          path: resolvePath(digest, { backend: base.backend, dir: base.dir })\n        });\n      }\n      function shapeResponse(plan, result) {\n        const base = plan || {};\n        const raw = result || {};\n        const response = {\n          ok: true,\n          evidence_version: EVIDENCE_VERSION,\n          op: base.op,\n          backend: base.backend,\n          uri: base.uri || null,\n          sha256: base.sha256 || null,\n          filename: base.filename === void 0 ? null : base.filename,\n          mime_type: base.mime_type === void 0 ? null : base.mime_type,\n          byte_size: base.byte_size === void 0 ? null : base.byte_size,\n          request_id: base.request_id || null\n        };\n        if (base.op === \"put\") return response;\n        const observed = requireDigest(raw.sha256, \"sha256 of the stored file\");\n        if (observed !== base.sha256) {\n          fail(\n            CODES.INTEGRITY,\n            `Evidence at ${base.uri} hashes to ${observed}. The bytes behind this record have changed.`,\n            { uri: base.uri, expected: base.sha256, observed }\n          );\n        }\n        response.byte_size = base64Bytes(raw.content_b64, \"content_b64 read back\");\n        response.content_b64 = String(raw.content_b64).replace(/\\s+/g, \"\");\n        return response;\n      }\n      module.exports = {\n        planRequest,\n        locatePut,\n        shapeResponse,\n        buildUri,\n        parseUri,\n        resolvePath,\n        base64Bytes,\n        EvidenceError,\n        EVIDENCE_VERSION,\n        SCHEME,\n        OPS,\n        BACKENDS,\n        CODES\n      };\n    }\n  });\n  return require_index();\n})();\n\n\n// Adapter: evidence-shape\n//\n// Last node in ppwr-evidence. Turns whatever the IO nodes produced into the one response shape\n// callers are allowed to depend on.\n//\n// Everything is read back from named nodes, not from the item, the same way store-shape\n// does it. A file node replaces the item json with what it read, so anything carried along on the\n// item is gone by the time it arrives here.\n//\n// A get is re-hashed and compared against the address it was fetched by. Evidence that no longer\n// matches its own address is the single failure this workflow must never absorb quietly: it means\n// the bytes behind an existing verdict have changed, and a verdict whose evidence moved underneath\n// it is not reproducible, whatever the finding rows say.\n//\n// Node settings: JavaScript, Run Once for All Items.\n\nconst plan = $('Plan evidence request').first().json._evidence;\n\nif (!plan) {\n  throw new Error('evidence-shape found no plan. Check the workflow connections.');\n}\n\nif (plan.op === 'put') {\n  return [{ json: PPWR_EVIDENCE.shapeResponse($('Locate evidence').first().json._evidence, {}) }];\n}\n\nreturn [\n  {\n    json: PPWR_EVIDENCE.shapeResponse(plan, {\n      sha256: $('Hash stored evidence').first().json.sha256,\n      content_b64: $('Evidence to Base64').first().json.content_b64,\n    }),\n  },\n];\n"
+      },
+      "name": "Shape evidence response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        120
+      ],
+      "notes": "Built from src/evidence/. Rebuild with npm run bundle."
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "content_b64",
+        "options": {
+          "fileName": "={{ $('Plan evidence request').first().json.filename || 'evidence' }}",
+          "mimeType": "={{ $('Plan evidence request').first().json.mime_type }}"
+        }
+      },
+      "name": "Evidence to binary for write",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        840,
+        -60
+      ],
+      "notes": "Converted a second time. Verified against a live instance: the Crypto node returns an item with no binary, so the bytes it just hashed cannot be written by anything downstream of it. Binary survives exactly one hop."
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "content_b64",
+        "options": {
+          "fileName": "evidence"
+        }
+      },
+      "name": "Base64 to binary for hashing",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        840,
+        300
+      ],
+      "notes": "One read from disk, then a round trip through base64 so the digest still covers the bytes that came off the disk. extractFromFile returns an item with no binary, so the hash needs its own copy."
+    }
+  ],
+  "connections": {
+    "Evidence request": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Plan evidence request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan evidence request": {
+      "main": [
+        [
+          {
+            "node": "Route operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route operation": {
+      "main": [
+        [
+          {
+            "node": "Evidence to binary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read evidence file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evidence to binary": {
+      "main": [
+        [
+          {
+            "node": "Hash uploaded evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash uploaded evidence": {
+      "main": [
+        [
+          {
+            "node": "Locate evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Locate evidence": {
+      "main": [
+        [
+          {
+            "node": "Evidence to binary for write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write evidence file": {
+      "main": [
+        [
+          {
+            "node": "Shape evidence response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read evidence file": {
+      "main": [
+        [
+          {
+            "node": "Evidence to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash stored evidence": {
+      "main": [
+        [
+          {
+            "node": "Shape evidence response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evidence to Base64": {
+      "main": [
+        [
+          {
+            "node": "Base64 to binary for hashing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evidence to binary for write": {
+      "main": [
+        [
+          {
+            "node": "Write evidence file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Base64 to binary for hashing": {
+      "main": [
+        [
+          {
+            "node": "Hash stored evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "PPWR_REF:ppwr-error-handler"
+  }
+}

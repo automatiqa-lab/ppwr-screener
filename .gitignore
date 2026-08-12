@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.*
+!.env.example
+.credentials.map.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Generated. Nothing under build/ is ever committed, so there is no drift to reconcile.
+build/
+
+# Evidence store and local data. Anchored to the root: an unanchored `evidence/` also
+# matches src/evidence/, which quietly kept the evidence library out of every commit.
+/data/
+/evidence/
+
+# Test scratch
+tests/__golden__/*.actual.json
+coverage/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build logs are private publications, not part of the project
+blog/

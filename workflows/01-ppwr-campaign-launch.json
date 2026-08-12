@@ -1,0 +1,669 @@
+{
+  "name": "ppwr-campaign-launch",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ppwr-campaign-launch\n\nWorks out which items are in scope, mints one signed link per item, and moves each one to `invited`.\n\n**The token**\n\n`<campaign_item_id>.<expires_ms>.<signature>`\n\nThe signature is an HMAC-SHA256 over `<campaign_item_id>|<expires_ms>`, taken by the Crypto node with the `PPWR Token Secret` credential. The secret lives in n8n's credential store and is nowhere in this repo.\n\nOnly `sha256(token)` is stored. The token itself exists in the link and nowhere else, so a copy of the database does not hand anyone a working link.\n\nWorkflow 02 then checks two things: the signature, which proves we minted it, and the stored hash, which proves it is the current one. Reissue a link and the old one stops working.\n\n**Sending** goes out one message per supplier, with all of their links in it. Forty items is one email.\n\n`dry_run: true` mints, stores and transitions without sending, and returns the links so a launch can be rehearsed. Set it to false when you mean it.\n\nA failed send is recorded against the vendor and the launch carries on. One bad address should not stop a campaign.",
+        "height": 720,
+        "width": 460,
+        "color": 1
+      },
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -820,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Mint\n\nOne signed link per item. The Crypto node does the signing and the Code nodes only assemble strings, so the secret never passes through JavaScript.",
+        "height": 300,
+        "width": 700,
+        "color": 7
+      },
+      "name": "Lane: Mint",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -220
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "Launch campaign (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -780,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ppwr/launch",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "name": "Launch campaign (webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -780,
+        820
+      ],
+      "webhookId": "ppwr-launch",
+      "notes": "The Public API cannot execute a workflow, so this is how an integration test drives a launch."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "campaign_id",
+              "value": "={{ $json.body ? $json.body.campaign_id : '' }}",
+              "type": "string"
+            },
+            {
+              "name": "form_base_url",
+              "value": "={{ $json.body && $json.body.form_base_url ? $json.body.form_base_url : 'https://n8n.example.com/form/ppwr-vendor-form' }}",
+              "type": "string"
+            },
+            {
+              "name": "token_ttl_days",
+              "value": 45,
+              "type": "number"
+            },
+            {
+              "name": "dry_run",
+              "value": "={{ $json.body && $json.body.dry_run === false ? false : true }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -520,
+        720
+      ],
+      "notes": "campaign_id      which campaign to launch\nform_base_url    where the supplier form is published. Set this to your own instance;\n                 the default is a placeholder and will produce links that go nowhere.\ntoken_ttl_days   how long a link stays valid\ndry_run          true mints and stores without sending"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "query",
+            "entity": "campaign_item",
+            "where": "={{ [ { field: 'campaign_id', op: 'eq', value: $json.campaign_id }, { field: 'state', op: 'eq', value: 'pending' } ] }}",
+            "match": "all"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Resolve items in scope",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        720
+      ],
+      "notes": "Mode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call, so anything after the first would be dropped and nothing said about it."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - one output item per campaign item, carrying what the token needs\n//\n// The expiry is computed once here rather than per node, so every token in a launch shares an\n// expiry and a re-run cannot produce two different windows for the same item.\n\nconst response = $input.first().json;\nif (!response.ok) throw new Error(`Store query failed: ${JSON.stringify(response.error)}`);\n\nconst config = $('Configuration').first().json;\nconst ttlDays = Number(config.token_ttl_days || 45);\nconst expiresMs = Date.now() + ttlDays * 24 * 60 * 60 * 1000;\n\nconst rows = response.rows || [];\nif (rows.length === 0) return [{ json: { _empty: true } }];\n\nreturn rows.map((row) => ({\n  json: {\n    campaign_item_id: row.campaign_item_id,\n    campaign_id: row.campaign_id,\n    item_id: row.item_id,\n    state: row.state,\n    expires_ms: expiresMs,\n    expires_at: new Date(expiresMs).toISOString(),\n    // The exact bytes the signature covers. Kept as its own field so the verifier in 02 can\n    // rebuild it without re-deriving the format from the token.\n    token_payload: `${row.campaign_item_id}|${expiresMs}`,\n  },\n}));"
+      },
+      "name": "One item per link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.token_payload }}",
+        "dataPropertyName": "token_sig",
+        "encoding": "base64"
+      },
+      "name": "Sign token",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        220,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ppwr - assemble the link\n//\n// The Crypto node emits standard base64, and the token goes into a URL, so + / = have to go.\n// Only the signature needs converting: a uuid and a millisecond count are already URL safe,\n// which is why the token is built from three plain parts rather than base64 encoded whole.\n\nconst item = $json;\nconst signature = String(item.token_sig)\n  .replace(/\\+/g, '-')\n  .replace(/\\//g, '_')\n  .replace(/=+$/, '');\n\nconst token = `${item.campaign_item_id}.${item.expires_ms}.${signature}`;\nconst base = String($('Configuration').first().json.form_base_url || '').replace(/\\/+$/, '');\n\nreturn {\n  json: Object.assign({}, item, {\n    token,\n    link: `${base}?t=${token}`,\n  }),\n};"
+      },
+      "name": "Assemble token and link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "value": "={{ $json.token }}",
+        "dataPropertyName": "token_hash",
+        "encoding": "hex"
+      },
+      "name": "Hash token for storage",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        700,
+        720
+      ],
+      "notes": "Only the hash is stored. A leaked database does not hand anyone a working link."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "put",
+            "entity": "campaign_item",
+            "mode": "update",
+            "where": "={{ [ { field: 'campaign_item_id', op: 'eq', value: $json.campaign_item_id } ] }}",
+            "data": "={{ { token_hash: $json.token_hash, token_expires_at: $json.expires_at, invited_at: new Date().toISOString() } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Store token hash",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        940,
+        720
+      ],
+      "notes": "Mode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call, so anything after the first would be dropped and nothing said about it."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "transition",
+            "transition": "={{ { campaign_item_id: $('Hash token for storage').item.json.campaign_item_id, from_state: 'pending', to_state: 'invited', event_type: 'invite_sent', actor: 'system', payload: { dry_run: $('Configuration').first().json.dry_run } } }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Transition to invited",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1180,
+        720
+      ],
+      "notes": "The state change and its event log row are written together by the store, so an invite cannot be recorded without a trail.\n\nMode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call, so anything after the first would be dropped and nothing said about it."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - what the launch did\n//\n// Links are returned only on a dry run. Once sending is wired they belong in the email and\n// nowhere else, because an execution log is not a place to keep working credentials.\n\nconst config = $('Configuration').first().json;\n// Nothing was minted on the empty branch, and referencing a node that never ran throws.\nlet minted = [];\ntry {\n  minted = $('Hash token for storage').all().map((entry) => entry.json).filter((m) => m && m.token);\n} catch (error) {\n  minted = [];\n}\nconst dryRun = config.dry_run !== false;\n\nconst incoming = $input.all().map((e) => e.json);\nconst failures = incoming.filter((r) => r && r.send_failed);\nconst sent = incoming.filter((r) => r && !r.send_failed && !r._empty);\n\nreturn [\n  {\n    json: {\n      ok: true,\n      campaign_id: config.campaign_id,\n      invited: minted.length,\n      dry_run: dryRun,\n      expires_at: minted.length > 0 ? minted[0].expires_at : null,\n      links: dryRun ? minted.map((m) => ({ campaign_item_id: m.campaign_item_id, link: m.link })) : undefined,\n      sent: dryRun ? 0 : sent.length,\n      send_failures: failures.map((f) => ({ contact_email: f.contact_email, error: f.error })),\n    },\n  },\n];"
+      },
+      "name": "Launch summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2900,
+        720
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "Anything in scope?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        900
+      ],
+      "notes": "True means nothing was pending. The run still reports what it did."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "get",
+            "entity": "packaging_item",
+            "key": "={{ { item_id: $('Hash token for storage').item.json.item_id } }}",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Load packaging item",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1660,
+        720
+      ],
+      "notes": "Soft: an item row that has gone missing must not kill a whole launch.\n\nMode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "PPWR_REF:ppwr-store",
+          "cachedResultName": "ppwr-store"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "get",
+            "entity": "vendor",
+            "key": "={{ { vendor_id: $json.row ? $json.row.vendor_id : '' } }}",
+            "soft": true
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        },
+        "mode": "each"
+      },
+      "name": "Load vendor",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1900,
+        720
+      ],
+      "notes": "Soft: same reason.\n\nMode is 'each'. The default passes every input item into one sub-execution, and the store answers a single request per call."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ppwr - one email per vendor, not one per item\n//\n// A supplier with forty items gets one message listing forty links. Sending forty separate\n// emails is how a compliance campaign gets marked as spam and then ignored.\n\nconst minted = $('Hash token for storage').all().map((e) => e.json);\nconst vendors = $input.all().map((e) => e.json);\n\nconst byVendor = new Map();\n\nvendors.forEach((response, index) => {\n  const vendor = response && response.row;\n  const link = minted[index];\n  if (!vendor || !vendor.contact_email || !link) return;\n\n  if (!byVendor.has(vendor.vendor_id)) {\n    byVendor.set(vendor.vendor_id, {\n      vendor_id: vendor.vendor_id,\n      legal_name: vendor.legal_name,\n      contact_email: vendor.contact_email,\n      contact_name: vendor.contact_name || null,\n      links: [],\n    });\n  }\n  byVendor.get(vendor.vendor_id).links.push({\n    campaign_item_id: link.campaign_item_id,\n    link: link.link,\n    expires_at: link.expires_at,\n  });\n});\n\n// Sorted so a re-run addresses vendors in the same order and two launches diff readably.\nconst groups = [...byVendor.values()].sort((a, b) => (a.vendor_id < b.vendor_id ? -1 : 1));\n\nreturn groups.map((group) => {\n  const count = group.links.length;\n  const plural = count === 1 ? '' : 's';\n  const lines = group.links.map((l) => '- ' + l.link).join('\\n');\n  const greeting = group.contact_name ? 'Dear ' + group.contact_name + ',' : 'Hello,';\n  return {\n    json: Object.assign({}, group, {\n      subject: 'Packaging declaration requested: ' + count + ' item' + plural,\n      body: [\n        greeting,\n        '',\n        'We are collecting packaging conformity declarations from our suppliers.',\n        'Please complete one short form for each of the ' + count + ' item' + plural + ' below.',\n        '',\n        lines,\n        '',\n        'Each link is personal to one item and stops working after ' + group.links[0].expires_at.slice(0, 10) + '.',\n        '',\n        'This form screens your declaration for completeness and internal consistency. It is not',\n        'a conformity assessment, it is not legal advice, and it is not a substitute for a',\n        'technical file or a notified body.',\n      ].join('\\n'),\n    }),\n  };\n});"
+      },
+      "name": "Group invites by vendor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Configuration').first().json.dry_run }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "name": "Actually send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2380,
+        720
+      ],
+      "notes": "A dry run mints, stores and transitions, then stops here. Everything except the email."
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "subject": "={{ $json.subject }}",
+        "bodyContent": "={{ $json.body }}",
+        "toRecipients": "={{ $json.contact_email }}",
+        "additionalFields": {
+          "bodyContentType": "Text"
+        }
+      },
+      "name": "Send invite",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        640
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "notes": "One bad address must not kill a 200 item campaign, so the error output is a modelled outcome instead of a swallow."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ppwr - a send that failed is recorded against the vendor, not lost\n//\n// The launch continues. The operator sees which address bounced in the summary and in the\n// execution list, rather than finding out when a supplier never replies.\n\nreturn {\n  json: {\n    send_failed: true,\n    vendor_id: $json.vendor_id || null,\n    contact_email: $json.contact_email || null,\n    error: $json.error ? String($json.error.message || $json.error) : 'unknown send failure',\n  },\n};"
+      },
+      "name": "Record send failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2620,
+        840
+      ]
+    }
+  ],
+  "connections": {
+    "Launch campaign (manual)": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Launch campaign (webhook)": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Resolve items in scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve items in scope": {
+      "main": [
+        [
+          {
+            "node": "One item per link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per link": {
+      "main": [
+        [
+          {
+            "node": "Anything in scope?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign token": {
+      "main": [
+        [
+          {
+            "node": "Assemble token and link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble token and link": {
+      "main": [
+        [
+          {
+            "node": "Hash token for storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash token for storage": {
+      "main": [
+        [
+          {
+            "node": "Store token hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store token hash": {
+      "main": [
+        [
+          {
+            "node": "Transition to invited",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transition to invited": {
+      "main": [
+        [
+          {
+            "node": "Load packaging item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything in scope?": {
+      "main": [
+        [
+          {
+            "node": "Launch summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sign token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load packaging item": {
+      "main": [
+        [
+          {
+            "node": "Load vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load vendor": {
+      "main": [
+        [
+          {
+            "node": "Group invites by vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group invites by vendor": {
+      "main": [
+        [
+          {
+            "node": "Actually send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actually send?": {
+      "main": [
+        [
+          {
+            "node": "Send invite",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Launch summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send invite": {
+      "main": [
+        [
+          {
+            "node": "Launch summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record send failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record send failure": {
+      "main": [
+        [
+          {
+            "node": "Launch summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "PPWR_REF:ppwr-error-handler"
+  }
+}
