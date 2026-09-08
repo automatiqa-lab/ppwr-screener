@@ -210,4 +210,4 @@ MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - [CHANGELOG.md](CHANGELOG.md)
 
-Part of [Automatiqa Lab](https://www.automatiqa.io) by Aleks Sidorecs.
+Part of [Automatiqa Lab](https://www.automatiqa.io) by Aleks Sidorecs. Project page: [automatiqa.io/ppwr-screener](https://www.automatiqa.io/ppwr-screener/).
