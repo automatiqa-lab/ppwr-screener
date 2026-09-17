@@ -211,3 +211,5 @@ MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 - [CHANGELOG.md](CHANGELOG.md)
 
 Part of [Automatiqa Lab](https://www.automatiqa.io) by Aleks Sidorecs. Project page: [automatiqa.io/ppwr-screener](https://www.automatiqa.io/ppwr-screener/).
+
+The argument these projects sit under: [The Intelligent Orchestration Manifesto](https://www.automatiqa.io/manifesto/).
