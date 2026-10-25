@@ -1,0 +1,78 @@
+name: checks
+
+# Exported n8n workflows must import cleanly and carry nothing from the author's instance:
+# every JSON file parses, each workflow has its nodes and connections, and no node holds a
+# credential reference, pinned execution data or an instance id. gitleaks then scans the full
+# history for embedded secrets.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate JSON and n8n exports
+        shell: python
+        run: |
+          import json, pathlib, sys
+
+          errors = []
+          for path in sorted(pathlib.Path(".").rglob("*.json")):
+              if ".git" in path.parts or "node_modules" in path.parts:
+                  continue
+              try:
+                  data = json.loads(path.read_text(encoding="utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                  errors.append(f"{path}: not valid JSON ({exc})")
+                  continue
+              if path.parts[0] != "workflows":
+                  continue
+              if not isinstance(data.get("nodes"), list) or not isinstance(data.get("connections"), dict):
+                  errors.append(f"{path}: missing nodes or connections")
+                  continue
+              if data.get("pinData"):
+                  errors.append(f"{path}: pinned execution data")
+              if data.get("active") is True:
+                  errors.append(f"{path}: exported as active")
+              if (data.get("meta") or {}).get("instanceId"):
+                  errors.append(f"{path}: carries an instance id")
+              for node in data["nodes"]:
+                  if node.get("credentials"):
+                      errors.append(f"{path}: node '{node.get('name')}' references a credential")
+              print(f"ok  {path}  {len(data['nodes'])} nodes")
+
+          for line in errors:
+              print(f"::error::{line}")
+          sys.exit(1 if errors else 0)
+      - name: Syntax-check the setup script
+        run: |
+          for f in setup.js install.js; do
+            if [ -f "$f" ]; then node --check "$f" && echo "ok  $f"; fi
+          done
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --no-banner --redact --verbose
